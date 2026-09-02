@@ -1,0 +1,439 @@
+---------Main Application Code-------------
+
+from flask import Flask
+from flask_sqlalchemy import SQLAlchemy
+from flask_login import LoginManager
+from werkzeug.security import generate_password_hash
+import os
+
+db = SQLAlchemy()
+login_manager = LoginManager()
+
+
+def create_app():
+    app = Flask(__name__)
+
+    app.config["SECRET_KEY"] = os.getenv(
+        "SECRET_KEY",
+        "development-secret-key"
+    )
+
+    app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv(
+        "DATABASE_URL",
+        "sqlite:///smart_expense.db"
+    )
+
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+    db.init_app(app)
+
+    login_manager.init_app(app)
+    login_manager.login_view = "auth.login"
+
+    from routes.auth import auth
+    from routes.dashboard import dashboard
+    from routes.transactions import transactions
+    from routes.budgets import budgets
+    from routes.goals import goals
+    from routes.api import api
+
+    app.register_blueprint(auth)
+    app.register_blueprint(dashboard)
+    app.register_blueprint(transactions)
+    app.register_blueprint(budgets)
+    app.register_blueprint(goals)
+    app.register_blueprint(api)
+
+    with app.app_context():
+        db.create_all()
+
+    return app
+
+
+@login_manager.user_loader
+def load_user(user_id):
+    from models.user import User
+    return db.session.get(User, int(user_id))
+
+
+if __name__ == "__main__":
+    app = create_app()
+    app.run(debug=True)
+
+
+
+
+
+-----------------User Model------------------
+
+from flask_login import UserMixin
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime
+
+from app import db
+
+
+class User(db.Model, UserMixin):
+
+    __tablename__ = "users"
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    username = db.Column(
+        db.String(100),
+        unique=True,
+        nullable=False
+    )
+
+    email = db.Column(
+        db.String(150),
+        unique=True,
+        nullable=False
+    )
+
+    password_hash = db.Column(
+        db.String(255),
+        nullable=False
+    )
+
+    created_at = db.Column(
+        db.DateTime,
+        default=datetime.utcnow
+    )
+
+    transactions = db.relationship(
+        "Transaction",
+        backref="user",
+        lazy=True,
+        cascade="all, delete-orphan"
+    )
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(
+            self.password_hash,
+            password
+        )
+
+    def __repr__(self):
+        return f"<User {self.username}>"
+
+
+
+---------------Transaction Model-----------------
+
+from datetime import datetime
+from app import db
+
+
+class Transaction(db.Model):
+
+    __tablename__ = "transactions"
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    amount = db.Column(
+        db.Float,
+        nullable=False
+    )
+
+    category = db.Column(
+        db.String(100),
+        nullable=False
+    )
+
+    transaction_type = db.Column(
+        db.String(20),
+        nullable=False
+    )
+
+    description = db.Column(
+        db.String(255)
+    )
+
+    date = db.Column(
+        db.DateTime,
+        default=datetime.utcnow
+    )
+
+    user_id = db.Column(
+        db.Integer,
+        db.ForeignKey("users.id"),
+        nullable=False
+    )
+
+    def __repr__(self):
+        return f"<Transaction {self.category}>"
+
+
+-----------------Budget Model------------------------
+
+
+
+from app import db
+
+
+class Budget(db.Model):
+
+    __tablename__ = "budgets"
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    category = db.Column(
+        db.String(100),
+        nullable=False
+    )
+
+    monthly_limit = db.Column(
+        db.Float,
+        nullable=False
+    )
+
+    user_id = db.Column(
+        db.Integer,
+        db.ForeignKey("users.id"),
+        nullable=False
+    )
+
+
+
+-------Financial Goal Model----------
+
+
+from app import db
+
+
+class Goal(db.Model):
+
+    __tablename__ = "goals"
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    title = db.Column(
+        db.String(150),
+        nullable=False
+    )
+
+    target_amount = db.Column(
+        db.Float,
+        nullable=False
+    )
+
+    current_amount = db.Column(
+        db.Float,
+        default=0
+    )
+
+    user_id = db.Column(
+        db.Integer,
+        db.ForeignKey("users.id"),
+        nullable=False
+    )
+
+    @property
+    def progress_percentage(self):
+
+        if self.target_amount == 0:
+            return 0
+
+        return round(
+            (self.current_amount / self.target_amount) * 100,
+            2
+        )
+
+
+
+------------Authentication System---------------
+
+
+from flask import Blueprint, render_template, redirect, url_for, flash, request
+from flask_login import login_user, logout_user, login_required
+
+from app import db
+from models.user import User
+
+
+auth = Blueprint("auth", __name__)
+
+
+@auth.route("/register", methods=["GET", "POST"])
+def register():
+
+    if request.method == "POST":
+
+        username = request.form.get("username")
+        email = request.form.get("email")
+        password = request.form.get("password")
+
+        existing_user = User.query.filter_by(
+            email=email
+        ).first()
+
+        if existing_user:
+            flash("Email already registered.", "danger")
+            return redirect(url_for("auth.register"))
+
+        user = User(
+            username=username,
+            email=email
+        )
+
+        user.set_password(password)
+
+        db.session.add(user)
+        db.session.commit()
+
+        flash("Account created successfully!", "success")
+
+        return redirect(url_for("auth.login"))
+
+    return render_template("register.html")
+
+
+@auth.route("/login", methods=["GET", "POST"])
+def login():
+
+    if request.method == "POST":
+
+        email = request.form.get("email")
+        password = request.form.get("password")
+
+        user = User.query.filter_by(
+            email=email
+        ).first()
+
+        if user and user.check_password(password):
+
+            login_user(user)
+
+            flash("Welcome back!", "success")
+
+            return redirect(
+                url_for("dashboard.index")
+            )
+
+        flash("Invalid email or password.", "danger")
+
+    return render_template("login.html")
+
+
+@auth.route("/logout")
+@login_required
+def logout():
+
+    logout_user()
+
+    flash("Logged out successfully.", "success")
+
+    return redirect(url_for("auth.login"))
+
+
+
+------------------Transaction Management---------------
+
+from flask import Blueprint, render_template, request, redirect, url_for, flash
+from flask_login import login_required, current_user
+
+from app import db
+from models.transaction import Transaction
+
+
+transactions = Blueprint(
+    "transactions",
+    __name__,
+    url_prefix="/transactions"
+)
+
+
+@transactions.route("/")
+@login_required
+def index():
+
+    data = Transaction.query.filter_by(
+        user_id=current_user.id
+    ).order_by(
+        Transaction.date.desc()
+    ).all()
+
+    return render_template(
+        "transactions.html",
+        transactions=data
+    )
+
+
+@transactions.route("/add", methods=["POST"])
+@login_required
+def add():
+
+    amount = float(request.form.get("amount"))
+
+    category = request.form.get("category")
+
+    transaction_type = request.form.get(
+        "transaction_type"
+    )
+
+    description = request.form.get("description")
+
+    transaction = Transaction(
+        amount=amount,
+        category=category,
+        transaction_type=transaction_type,
+        description=description,
+        user_id=current_user.id
+    )
+
+    db.session.add(transaction)
+    db.session.commit()
+
+    flash("Transaction added successfully!", "success")
+
+    return redirect(
+        url_for("transactions.index")
+    )
+
+
+@transactions.route("/delete/<int:id>")
+@login_required
+def delete(id):
+
+    transaction = Transaction.query.get_or_404(id)
+
+    if transaction.user_id != current_user.id:
+        flash("Unauthorized action.", "danger")
+        return redirect(
+            url_for("transactions.index")
+        )
+
+    db.session.delete(transaction)
+    db.session.commit()
+
+    flash("Transaction deleted.", "success")
+
+    return redirect(
+        url_for("transactions.index")
+    )
+
+
+---------Docker Configuration----------
+
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 5000
+
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:create_app()"]
+
+
+
+---------------------------------------------------------------------------------------------------------
